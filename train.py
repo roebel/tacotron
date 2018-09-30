@@ -3,10 +3,12 @@ import argparse
 from datetime import datetime
 import math
 import os
+import sys
 import subprocess
 import time
 import tensorflow as tf
 import traceback
+import manage_gpus as gpl
 
 from datasets.datafeeder import DataFeeder
 from hparams import hparams, hparams_debug_string
@@ -15,6 +17,20 @@ from text import sequence_to_text
 from util import audio, infolog, plot, ValueWindow
 log = infolog.log
 
+def get_gpu_lock(gpu_device_id, soft=False):
+  gpu_id_locked=gpl.obtain_lock_id(id=gpu_device_id, hard=not soft)
+  if gpu_id_locked < 0:
+    #  lock removal has time delay of 2 so be sure to have the lock of the last run removed we wait
+    # for 3 s here
+    time.sleep(3)
+    gpu_id_locked=gpl.obtain_lock_id(id=gpu_device_id, hard=not soft)
+    if gpu_id_locked < 0:
+      if gpu_device_id < 0:
+        raise RuntimeError("No GPUs available for locking")
+      else:
+        raise RuntimeError("cannot obtain the selected GPU {0}".format(str(gpu_device_id)))
+      
+    return gpu_id_locked
 
 def get_git_commit():
   subprocess.check_output(['git', 'diff-index', '--quiet', 'HEAD'])   # Verify client is clean
@@ -140,15 +156,61 @@ def main():
   parser.add_argument('--slack_url', help='Slack webhook URL to get periodic reports.')
   parser.add_argument('--tf_log_level', type=int, default=1, help='Tensorflow C++ log level.')
   parser.add_argument('--git', action='store_true', help='If set, verify that the client is clean.')
+  device_arg = parser.add_mutually_exclusive_group()
+  device_arg.add_argument("--cpu", action="store_true",
+                          help='use cpu for calculations, this is the default on sytems without available gpu card (Def: %(default)s)')
+  device_arg.add_argument('-d',"--gpu_device", default=None, nargs="?", const=-1, type=int,
+                          help='use gpu device, use without argument for arbitrary gpu, this is the default for systems with gpu (Def: %(default)s)')
+
+  parser.add_argument("--soft_lock", action="store_true",
+                      help='only request a soft lock on the GPU (Def: %(default)s)')
+
   args = parser.parse_args()
   os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(args.tf_log_level)
-  run_name = args.name or args.model
-  log_dir = os.path.join(args.base_dir, 'logs-%s' % run_name)
-  os.makedirs(log_dir, exist_ok=True)
-  infolog.init(os.path.join(log_dir, 'train.log'), run_name, args.slack_url)
-  hparams.parse(args.hparams)
-  train(log_dir, args)
 
+  comp_device = None
+  gpu_device_id = None
+  if not args.cpu :
+    # gpu_ids will be None on systems without gpu nvidia card
+    gpu_ids=gpl.board_ids()
+    if gpu_ids is not None:
+      if args.gpu_device is None or args.gpu_device == -1:
+        gpu_device_id = -1
+      elif args.gpu_device in gpu_ids:
+        gpu_device_id = args.gpu_device
+      else:
+        raise RuntimeError("train_onsets::error:: selected gpu device if {} is not free, select an id from {}".format(args.gpu_device, gpu_ids) )
+    elif args.gpu_device is not None:
+      raise RuntimeError("train_onsets::error:: no gpu devices available on thsi system, you cannot select a gpu")
 
+    print("gpu_device_id", gpu_device_id)  
+    try:
+      # now we lock a GPU because we will need one
+      if gpu_device_id is not None:
+        gpu_id_locked = get_gpu_lock(gpu_device_id = gpu_device_id, soft=args.soft_lock)
+        # obtainlock positions CUDA_VISIBLE_DEVICES such that only the selected GPU is visibale,
+        # therefore we need now select /GPU:0
+        comp_device = "/GPU:0"
+      else:
+        gpu_id_locked=-1
+        comp_device="/cpu:0"
+        os.environ['CUDA_VISIBLE_DEVICES'] = ""
+
+      run_name = args.name or args.model
+      log_dir = os.path.join(args.base_dir, 'logs-%s' % run_name)
+      os.makedirs(log_dir, exist_ok=True)
+      infolog.init(os.path.join(log_dir, 'train.log'), run_name, args.slack_url)
+      hparams.parse(args.hparams)
+      train(log_dir, args)
+    except Exception as ex:
+      import traceback
+      tb=traceback.format_exc()
+      print("{0} received exception::".format(sys.argv[0]), str(ex), tb, file=sys.stderr)
+
+    finally:
+      # terminate input pipeline
+      if ("GPU" in comp_device) and (gpu_id_locked >= 0):
+        gpl.free_lock(gpu_id_locked)
+                             
 if __name__ == '__main__':
   main()
