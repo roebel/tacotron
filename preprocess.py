@@ -1,3 +1,4 @@
+#! /usr/bin/env python
 import argparse
 import os
 from multiprocessing import cpu_count
@@ -35,10 +36,12 @@ def write_metadata(metadata, out_dir):
 
 def main():
   parser = argparse.ArgumentParser()
-  parser.add_argument('--base_dir', default=os.path.expanduser('~/tacotron'))
-  parser.add_argument('--output', default='training')
-  parser.add_argument('--dataset', required=True, choices=['blizzard', 'ljspeech'])
-  parser.add_argument('--num_workers', type=int, default=cpu_count())
+  parser.add_argument('--base_dir', default=os.path.dirname(os.path.abspath(__file__)), help="tacotron base directory (Def: %(default)s)")
+  parser.add_argument('--output', default='training', help="output directory (Def: %(default)s)")
+  parser.add_argument('--dataset', required=True, choices=['blizzard', 'ljspeech'],
+                      help="dataset to work on, required either blizzard or ljspeech")
+  parser.add_argument('--num_workers', type=int, default=cpu_count(),
+                      help="number of threads (Def: %(default)s)")
   args = parser.parse_args()
   if args.dataset == 'blizzard':
     preprocess_blizzard(args)
